@@ -12,12 +12,9 @@
 #define PATH_MAX 4096
 #endif
 
-#include "tag_reader.h" // tag reader
-
 /*
- * Count MP3 files
+ * Count MP3 files in a directory
  */
-
 int file_counter(const char *folder_path)
 {
     DIR *folder;
@@ -35,159 +32,118 @@ int file_counter(const char *folder_path)
 
     while ((entry = readdir(folder)) != NULL)
     {
-        /* Ignore "." and ".." */
-        if (strcmp(entry-> d_name, ".") == 0 ||
-            strcmp(entry-> d_name, "..") == 0)
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
         {
             continue;
         }
 
-        /* Create complete file path */
-        char full_path[1024];
+        char full_path[PATH_MAX];
 
-        snprintf(full_path, sizeof(full_path),
-                 "%s/%s", folder_path, entry-> d_name);
+        int path_length = snprintf(
+            full_path,
+            sizeof(full_path),
+            "%s/%s",
+            folder_path,
+            entry->d_name
+        );
 
-        /* Get file information */
+        if (path_length < 0 ||
+            (size_t)path_length >= sizeof(full_path))
+        {
+            continue;
+        }
+
         if (stat(full_path, &file_info) != 0)
         {
             continue;
         }
 
-        /* Check if file ends in .mp3 */
-        const char *extention = strrchr(entry-> d_name, '.');
+        if (!S_ISREG(file_info.st_mode))
+        {
+            continue;
+        }
 
-        if (extention != NULL &&
-            strcasecmp(extention, ".mp3") == 0)
+        const char *extension = strrchr(entry->d_name, '.');
+
+        if (extension != NULL &&
+            strcasecmp(extension, ".mp3") == 0)
         {
             number_of_files++;
         }
     }
+
     closedir(folder);
 
     return number_of_files;
 }
 
+
 /*
- * removes whitespace from the end of a string
- *
- * ID3v1 fields have fixed sizes. An artist field is always 30 bytes
- *
- * if the artist is "R.E.M this function changes it to "R.E.M"
+ * Remove whitespace from the end of a string.
  */
 static void trim_string(char *string)
 {
-    int length = strlen(string);
+    size_t length;
+
+    if (string == NULL)
+    {
+        return;
+    }
+
+    length = strlen(string);
 
     while (length > 0 &&
-        isspace((unsigned char)string[length - 1])) {
-
+           isspace((unsigned char)string[length - 1]))
+    {
         string[length - 1] = '\0';
-    length--;
-        }
+        length--;
+    }
 }
 
 
-
 /*
- * Copy a fixed sized ID3 field into a normal C string
- * ID3v1 fields:
- * Title: 30 bytes
- * Artist: 30 bytes
- * Album: 30 bytes
- * Year: 4 bytes
- *
- * Normal C strings add '\0' at the end
- *
- * Purpose:
- *
- * detertimes how many bytes to copy
- * prevents buffer overflow
- * copies the bytes
- * adds '\0'
- * removes trailing spaces
+ * Copy a fixed-size ID3 field into a normal C string.
  */
-
 static void copy_field(
     char *destination,
     int destination_size,
     const unsigned char *source,
     int source_size)
-
 {
     int length;
 
-    /*
-     * makes sure the destination and source is valid
-     */
     if (destination == NULL ||
         source == NULL ||
-        destination_size <= 0)
+        destination_size <= 0 ||
+        source_size <= 0)
     {
         return;
     }
-    /*
-     * Start with the size of the ID3v1 feild
-     */
+
     length = source_size;
-    /*
-     * leave room for '\0'
-     * example:
-     * destination_size = 31
-     * maximum charaters = 30
-     */
+
     if (length > destination_size - 1)
     {
         length = destination_size - 1;
     }
 
-    /*
-     * copy ID3v1 bytes into a C string
-     */
     memcpy(destination, source, length);
-
-    /*
-     * add c string terminator '\0'
-     */
 
     destination[length] = '\0';
 
     trim_string(destination);
 }
+
+
 /*
- * Function: copy_utf16_text
+ * Basic UTF-16 -> ASCII conversion.
  *
- * Purpose: copies UTF-16 text into a c string
- *
- * ID3v2.3 text frames sometimes uses UTF-16 encoding
- * the first byte of the frame data is the encoding byte
- * 0 = ISO8859
- * 1 = UTF16
- *
- * this function is called after the encoding byte has already been removed so the "source" points to the UFC16 data itself
- * also:
- * checks that the destination and source are valid
- * checks the utf16 byte order mark
- * determines the byte order
- * reads every character
- * stops reading when it reaches the null terminator
- * converts basic ASCII Characters into a normal c string
- * uses '?' for characters outside of basic ASCII
- * adds '\0' to terminate the c string
- *
- * UTF16 normall starts with byte order mark
+ * Supports:
  * FF FE = little endian
  * FE FF = big endian
  *
- *
- * Parameters:
- * destination - destination c string
- * destination_size - size of destination buffer
- * source UTF16 source data
- * source size - number of bytes in source
- *
- * Note:
- * this helper preforms a basic UTF16 to ASCII conversion
+ * Characters outside basic ASCII become '?'.
  */
 static void copy_utf16_text(
     char *destination,
@@ -204,10 +160,17 @@ static void copy_utf16_text(
         destination_size <= 0 ||
         source_size < 2)
     {
+        if (destination != NULL && destination_size > 0)
+        {
+            destination[0] = '\0';
+        }
+
         return;
     }
 
-    /* Check UTF-16 BOM */
+    /*
+     * Check UTF-16 BOM.
+     */
     if (source[0] == 0xFF && source[1] == 0xFE)
     {
         little_endian = 1;
@@ -220,7 +183,6 @@ static void copy_utf16_text(
     }
     else
     {
-        /* No BOM -- ID3v2.3 UTF-16 should normally have one */
         destination[0] = '\0';
         return;
     }
@@ -232,18 +194,22 @@ static void copy_utf16_text(
 
         if (little_endian)
         {
-            character = (unsigned short)source[position] |
-                        ((unsigned short)source[position + 1] << 8);
+            character =
+                (unsigned short)source[position] |
+                ((unsigned short)source[position + 1] << 8);
         }
         else
         {
-            character = ((unsigned short)source[position] << 8) |
-                        (unsigned short)source[position + 1];
+            character =
+                ((unsigned short)source[position] << 8) |
+                (unsigned short)source[position + 1];
         }
 
         position += 2;
 
-        /* UTF-16 string terminator */
+        /*
+         * UTF-16 string terminator.
+         */
         if (character == 0x0000)
         {
             break;
@@ -251,7 +217,6 @@ static void copy_utf16_text(
 
         /*
          * Basic ASCII conversion.
-         * Characters outside ASCII become '?'.
          */
         if (character < 128)
         {
@@ -266,27 +231,13 @@ static void copy_utf16_text(
     destination[output] = '\0';
 }
 
+
 /*
- * Function: read_mp3_tags
+ * Read ID3v1 tags.
  *
- * Parameters:
- * filename - path to mp3 file
- * artist - array where the artist will be stored
- * artist_size - size of artist array
- * album - array where the album name will be stored
- * album_size - size of the album array
- * title - array where the title will be stored
- * title_size - size of the title array
- * year - array where the year will be stored
- * year_size - size of the year array
- * comment - array where comments will be stored
- * comment_size - size of the comment array
- * genre - array where the genre of the track is stored
- * genre_size - size of the genre array
- *
- * Return:
- * 1 = success
- * 0 = failure / no ID3v1 tag
+ * Returns:
+ * 1 = ID3v1 tag found
+ * 0 = no ID3v1 tag / error
  */
 int read_mp3_tags(
     const char *filename,
@@ -301,173 +252,168 @@ int read_mp3_tags(
     char *comment,
     int comment_size,
     char *genre,
-    int genre_size
-)
+    int genre_size)
 {
     FILE *file;
     unsigned char tag[128];
+
     file = fopen(filename, "rb");
 
-    if (file == NULL){
+    if (file == NULL)
+    {
         return 0;
     }
 
     /*
-     * An ID3v1 tag is 128 bytes and is located at the end of the mp3 file
+     * ID3v1 tag is the final 128 bytes.
      */
-
-    if (fseek(file, -128L, SEEK_END) != 0) {
+    if (fseek(file, -128L, SEEK_END) != 0)
+    {
         fclose(file);
         return 0;
     }
 
-    if (fread(tag , 1, 128, file) != 128) {
+    if (fread(tag, 1, 128, file) != 128)
+    {
         fclose(file);
         return 0;
     }
 
-    printf("Read bytes: %02X %02X %02X\n",
-           tag[0], tag[1], tag[2]);
     fclose(file);
+
     /*
-     * First three bytes are TAG
-     * 3..32 == title
-     * 33.62 == artist
-     * 63..92 == album
-     * 93..96 == year
-     * 97..126 == comment
-     * 127 == genre
+     * ID3v1 must start with TAG.
      */
-    if (memcmp(tag, "TAG", 3) != 0){
+    if (memcmp(tag, "TAG", 3) != 0)
+    {
         return 0;
     }
-    copy_field(title, title_size, &tag [3], 30);
-    copy_field(artist, artist_size, &tag [33], 30);
-    copy_field(album, album_size, &tag [63], 30);
-    copy_field(year, year_size, &tag [93], 4);
-    copy_field(comment, comment_size, &tag [97], 30);
-    /*
-     * genres are a number instead of a string
-     * tag[127] = 17 = Rock
-     */
 
-    static const char *id3_genres[] = {
-    "Blues",
-    "Classic Rock",
-    "Country",
-    "Dance",
-    "Disco",
-    "Funk",
-    "Grunge",
-    "Hip-Hop",
-    "Jazz",
-    "Metal",
-    "New Age",
-    "Oldies",
-    "Other",
-    "Pop",
-    "R&B",
-    "Rap",
-    "Reggae",
-    "Rock",
-    "Techno",
-    "Industrial",
-    "Alternative",
-    "Ska",
-    "Death Metal",
-    "Pranks",
-    "Soundtrack",
-    "Euro-Techno",
-    "Ambient",
-    "Trip-Hop",
-    "Vocal",
-    "Jazz+Funk",
-    "Fusion",
-    "Trance",
-    "Classical",
-    "Instrumental",
-    "Acid",
-    "House",
-    "Game",
-    "Sound Clip",
-    "Gospel",
-    "Noise",
-    "AlternRock",
-    "Bass",
-    "Soul",
-    "Punk",
-    "Space",
-    "Meditative",
-    "Instrumental Pop",
-    "Instrumental Rock",
-    "Ethnic",
-    "Gothic",
-    "Darkwave",
-    "Techno-Industrial",
-    "Electronic",
-    "Pop-Folk",
-    "Eurodance",
-    "Dream",
-    "Southern Rock",
-    "Comedy",
-    "Cult",
-    "Gangsta",
-    "Top 40",
-    "Christian Rap",
-    "Pop/Funk",
-    "Jungle",
-    "Native American",
-    "Cabaret",
-    "New Wave",
-    "Psychadelic",
-    "Rave",
-    "Showtunes",
-    "Trailer",
-    "Lo-Fi",
-    "Tribal",
-    "Acid Punk",
-    "Acid Jazz",
-    "Polka",
-    "Retro",
-    "Musical",
-    "Rock & Roll",
-    "Hard Rock"
-};
+    copy_field(title, title_size, &tag[3], 30);
+    copy_field(artist, artist_size, &tag[33], 30);
+    copy_field(album, album_size, &tag[63], 30);
+    copy_field(year, year_size, &tag[93], 4);
+    copy_field(comment, comment_size, &tag[97], 30);
+
+    static const char *id3_genres[] =
+    {
+        "Blues",
+        "Classic Rock",
+        "Country",
+        "Dance",
+        "Disco",
+        "Funk",
+        "Grunge",
+        "Hip-Hop",
+        "Jazz",
+        "Metal",
+        "New Age",
+        "Oldies",
+        "Other",
+        "Pop",
+        "R&B",
+        "Rap",
+        "Reggae",
+        "Rock",
+        "Techno",
+        "Industrial",
+        "Alternative",
+        "Ska",
+        "Death Metal",
+        "Pranks",
+        "Soundtrack",
+        "Euro-Techno",
+        "Ambient",
+        "Trip-Hop",
+        "Vocal",
+        "Jazz+Funk",
+        "Fusion",
+        "Trance",
+        "Classical",
+        "Instrumental",
+        "Acid",
+        "House",
+        "Game",
+        "Sound Clip",
+        "Gospel",
+        "Noise",
+        "AlternRock",
+        "Bass",
+        "Soul",
+        "Punk",
+        "Space",
+        "Meditative",
+        "Instrumental Pop",
+        "Instrumental Rock",
+        "Ethnic",
+        "Gothic",
+        "Darkwave",
+        "Techno-Industrial",
+        "Electronic",
+        "Pop-Folk",
+        "Eurodance",
+        "Dream",
+        "Southern Rock",
+        "Comedy",
+        "Cult",
+        "Gangsta",
+        "Top 40",
+        "Christian Rap",
+        "Pop/Funk",
+        "Jungle",
+        "Native American",
+        "Cabaret",
+        "New Wave",
+        "Psychadelic",
+        "Rave",
+        "Showtunes",
+        "Trailer",
+        "Lo-Fi",
+        "Tribal",
+        "Acid Punk",
+        "Acid Jazz",
+        "Polka",
+        "Retro",
+        "Musical",
+        "Rock & Roll",
+        "Hard Rock"
+    };
 
     unsigned char genre_id = tag[127];
-    /*
-     * calculate how man genres are in the ID3v1 table
-     */
-    int genre_count = sizeof(id3_genres) / sizeof(id3_genres[0]);
-    /*
-     * check if the genre number exsists
-     */
-    if (genre_id < genre_count)
+
+    int genre_count =
+        sizeof(id3_genres) / sizeof(id3_genres[0]);
+
+    if (genre != NULL && genre_size > 0)
     {
-        snprintf(genre,
-                 genre_size,
-                 "%s",
-                 id3_genres[genre_id]);
-    }
-    else
-    {
-        /*
-         * Unknown genre number
-         */
-        snprintf(genre,
-                 genre_size,
-                 "Unknown");
+        if (genre_id < genre_count)
+        {
+            snprintf(
+                genre,
+                genre_size,
+                "%s",
+                id3_genres[genre_id]
+            );
+        }
+        else
+        {
+            snprintf(
+                genre,
+                genre_size,
+                "Unknown"
+            );
+        }
     }
 
     return 1;
 }
 
+
 /*
- * Function: read_id3v2_tags
+ * Read ID3v2.3 tags.
  *
- * Purpose: if the MP3 file doesn't have ID3v1 metadata then it will check for version 2.3
+ * Supported frames:
  *
- * Supported Frames:
  * TIT2 = title
  * TPE1 = artist
  * TALB = album
@@ -475,12 +421,11 @@ int read_mp3_tags(
  * COMM = comment
  * TCON = genre
  *
- *
  * Returns:
- * 1 = 1d3v2.3 tags found
- * 0 = no useable id3v2.3 tags
+ * 1 = ID3v2.3 tag found
+ * 0 = no usable ID3v2.3 tag
  */
-atic int read_id3v2_tags(
+static int read_id3v2_tags(
     const char *filename,
     char *artist,
     int artist_size,
@@ -498,60 +443,54 @@ atic int read_id3v2_tags(
     FILE *file;
     unsigned char header[10];
 
-    /*
-     * open mp3
-     */
     file = fopen(filename, "rb");
 
     if (file == NULL)
     {
-        perror("fopen");
         return 0;
     }
+
     /*
-     * ID3v2 header is the first ten bytes of the file
+     * ID3v2 header is the first 10 bytes.
      */
-    if(fread(header, 1, 10, file)!= 10)
+    if (fread(header, 1, 10, file) != 10)
     {
         fclose(file);
         return 0;
     }
 
-    fclose(file);
     /*
-     * first three bytes muse be ID3
+     * First three bytes must be ID3.
      */
     if (memcmp(header, "ID3", 3) != 0)
-    {
-        printf("No ID3v2 tags: %s\n", filename);
-        return 0;
-    }
-    /*
-     * exspecting ID3v2.3
-     */
-    if(header[3] != 3)
     {
         fclose(file);
         return 0;
     }
+
     /*
-     * ID3v2 tag size is a syncsafe interger
+     * ID3v2.3.
      */
- unsigned int tag_size =
-    ((unsigned int)(header[6] & 0x7f) << 21) |
-    ((unsigned int)(header[7] & 0x7f) << 14) |
-    ((unsigned int)(header[8] & 0x7f) << 7) |
-    ((unsigned int)(header[9] & 0x7f));
+    if (header[3] != 3)
+    {
+        fclose(file);
+        return 0;
+    }
+
+    /*
+     * ID3v2 tag size is a syncsafe integer.
+     */
+    unsigned int tag_size =
+        ((unsigned int)(header[6] & 0x7f) << 21) |
+        ((unsigned int)(header[7] & 0x7f) << 14) |
+        ((unsigned int)(header[8] & 0x7f) << 7) |
+        ((unsigned int)(header[9] & 0x7f));
 
     printf("ID3v2 tag found!\n");
     printf("Version: 2.%d\n", header[3]);
     printf("Revision: %d\n", header[4]);
     printf("Flags: %02x\n", header[5]);
     printf("Tag Size: %u bytes\n", tag_size);
-
-    /*
-     * nothing to read
-     */
 
     if (tag_size == 0)
     {
@@ -560,9 +499,10 @@ atic int read_id3v2_tags(
     }
 
     /*
-     * Allocate memory from ID3v2 tag
+     * Allocate memory for the tag.
      */
-    unsigned char *tag_data = malloc(tag_size);
+    unsigned char *tag_data =
+        malloc(tag_size);
 
     if (tag_data == NULL)
     {
@@ -572,7 +512,7 @@ atic int read_id3v2_tags(
     }
 
     /*
-     * Read the ID3v3 tag
+     * File is still open here.
      */
     if (fread(tag_data, 1, tag_size, file) != tag_size)
     {
@@ -580,217 +520,287 @@ atic int read_id3v2_tags(
         fclose(file);
         return 0;
     }
-    fclose(flie);
 
-    /*
-     * Position inside tag_data
-     *
-     * Each ID3v2.3 frame has:
-     *
-     * 4 bytes = frame ID
-     * 4 bytes = frame size
-     * 2 bytes = flags
-     *
-     * Total = 10 byte frame header
-     */
+    fclose(file);
+
     unsigned int position = 0;
 
     while (position + 10 <= tag_size)
     {
-        /*
-         *frame ID
-         */
         char frame_id[5];
-        memcpy(frame_id, &tag_data[position], 4);
+
+        memcpy(
+            frame_id,
+            &tag_data[position],
+            4
+        );
+
         frame_id[4] = '\0';
 
         /*
-         * empty frame means we've reached padding
+         * Empty frame means padding.
          */
-        if (frame_id[0] == '\0')'
+        if (frame_id[0] == '\0')
         {
             break;
         }
 
         /*
-         * ID3v2.3 frame size is a normal big-endian 32 bit interger
+         * Frame size is big-endian.
          */
         unsigned int frame_size =
-        ((unsigned int)tag_data[position + 4]<<24) |
-        ((unsigned int)tag_data[position + 5]<<16) |
-        ((unsigned int)tag_data[position + 6]<<8) |
-        ((unsigned int)tag_data[position +7]);
+            ((unsigned int)tag_data[position + 4] << 24) |
+            ((unsigned int)tag_data[position + 5] << 16) |
+            ((unsigned int)tag_data[position + 6] << 8) |
+            ((unsigned int)tag_data[position + 7]);
 
         /*
-         * Make sure frame fits inside tag
+         * Make sure frame fits inside tag.
          */
         if (position + 10 + frame_size > tag_size)
         {
             break;
         }
-        printf("Frame %s Size: %u\n", frame_id, frame_size);
+
+        printf(
+            "Frame %s Size: %u\n",
+            frame_id,
+            frame_size
+        );
+
+        unsigned char *frame_data =
+            &tag_data[position + 10];
 
         /*
-         * Frame data starts after the 10 byte header
-         */
-        unsigned char *frame_data = &tag_data[position + 10];
-
-        /*
-         * Text Frames:
-         * Byte 0 = text encoding
+         * Text frames.
          *
-         * ID3V2.3:
-         * 0 = ISO-8859-1
-         * 1 = UTF-16
-         *
-         * for now ISO-8859-1/ASCII is supported
+         * Byte 0 = encoding.
          */
         if (strcmp(frame_id, "TIT2") == 0 ||
             strcmp(frame_id, "TPE1") == 0 ||
             strcmp(frame_id, "TALB") == 0 ||
             strcmp(frame_id, "TYER") == 0 ||
             strcmp(frame_id, "TCON") == 0)
+        {
+            if (frame_size > 1)
             {
-                if (frame_size > 1)
+                unsigned char encoding =
+                    frame_data[0];
+
+                if (encoding == 0)
                 {
                     /*
-                     * first byte tells the text encoding
+                     * ISO-8859-1 / ASCII.
                      */
-                    unsigned char encoding = frame_data[0];
+                    unsigned int text_length =
+                        frame_size - 1;
 
-                    /*
-                     * ISO8859-1/ASCII
-                     */
-                    if (encoding == 0)
+                    char *text =
+                        (char *)&frame_data[1];
+
+                    if (strcmp(frame_id, "TIT2") == 0)
                     {
-                        /*
-                         * skip the encoding byte. the actual text starts at byte 1
-                         */
-                        unsigned int text_length = frame_size - 1;
+                        unsigned int copy_length =
+                            text_length;
 
-                        char *text = (char *)&frame_data[1];
-
-                        /*
-                         * TIT2 = title
-                         */
-                        if (strcmp(frame_id, "TIT2") == 0)
+                        if (copy_length >=
+                            (unsigned int)title_size)
                         {
-                            unsigned int copy_length = text_length;
-
-                            if (copy_length >= (unsigned int)title_size)
-                            {
-                                copy_length = title_size - 1
-                            }
-
-                            memcpy(title, text, copy_length);
-                            title[copy_length] = '\0';
+                            copy_length =
+                                title_size - 1;
                         }
 
-                        /*
-                         * TPE1 = artist
-                         */
-                        else if (strcmp(frame_id, "TEP1") == 0)
-                        {
-                            unsigned int copy_length = text_length;
-                            if (copy_length >= (unsigned int)artist_size)
-                            {
-                                copy_length = artist_size - 1
-                            }
+                        memcpy(
+                            title,
+                            text,
+                            copy_length
+                        );
 
-                            memcpy(artist, text, copy_length);
-                            artist[copy_length] = '\0';
-                        }
-
-                        /*
-                         * TALB = album
-                         */
-                        else if (strcmp(frame_id, "TALB") == 0)
-                        {
-                            unsigned int copy_length = text_length;
-                            if (copy_length >= (unsigned int)album_size)
-                            {
-                                copy_length = album_size - 1
-                            }
-
-                            memcpy(album, text, copy_length);
-                            album[copy_length] = '\0';
-                        }
-
-                        /*
-                         * TYER = year
-                         */
-                        else if (strcmp(frame_id, "TYER") == 0)
-                        {
-                            unsigned int copy_length = text_length;
-                            if (copy_length >= (unsigned int)year_size)
-                            {
-                                copy_length = year_size - 1
-                            }
-
-                            memcpy(year, text, copy_length);
-                            year[copy_length] = '\0';
-                        }
-                            /*
-                             * TCON = genre
-                             */
-                            else if (strcmp(frame_id, "TCON") == 0)
-                            {
-                                unsigned int copy_length = text_length;
-                                if (copy_length >= (unsigned int)genre_size)
-                                {
-                                    copy_length = genre_size - 1
-                                }
-
-                                memcpy(genre, text, copy_length);
-                                genre[copy_length] = '\0';
-                            }
+                        title[copy_length] = '\0';
                     }
-                    else if (encoding == 1)
+                    else if (strcmp(frame_id, "TPE1") == 0)
                     {
-                        /*UTF-16*/
-                        const unsigned char *text = &frame_data[1];
-                        unsigned int text_length = frame_size - 1;
+                        unsigned int copy_length =
+                            text_length;
 
-                        if(strcmp(frame_id, "TIT2") == 0)
+                        if (copy_length >=
+                            (unsigned int)artist_size)
                         {
-                            copy_utf16_text(title, text)
+                            copy_length =
+                                artist_size - 1;
                         }
+
+                        memcpy(
+                            artist,
+                            text,
+                            copy_length
+                        );
+
+                        artist[copy_length] = '\0';
+                    }
+                    else if (strcmp(frame_id, "TALB") == 0)
+                    {
+                        unsigned int copy_length =
+                            text_length;
+
+                        if (copy_length >=
+                            (unsigned int)album_size)
+                        {
+                            copy_length =
+                                album_size - 1;
+                        }
+
+                        memcpy(
+                            album,
+                            text,
+                            copy_length
+                        );
+
+                        album[copy_length] = '\0';
+                    }
+                    else if (strcmp(frame_id, "TYER") == 0)
+                    {
+                        unsigned int copy_length =
+                            text_length;
+
+                        if (copy_length >=
+                            (unsigned int)year_size)
+                        {
+                            copy_length =
+                                year_size - 1;
+                        }
+
+                        memcpy(
+                            year,
+                            text,
+                            copy_length
+                        );
+
+                        year[copy_length] = '\0';
+                    }
+                    else if (strcmp(frame_id, "TCON") == 0)
+                    {
+                        unsigned int copy_length =
+                            text_length;
+
+                        if (copy_length >=
+                            (unsigned int)genre_size)
+                        {
+                            copy_length =
+                                genre_size - 1;
+                        }
+
+                        memcpy(
+                            genre,
+                            text,
+                            copy_length
+                        );
+
+                        genre[copy_length] = '\0';
+                    }
+                }
+                else if (encoding == 1)
+                {
+                    /*
+                     * UTF-16.
+                     */
+                    const unsigned char *text =
+                        &frame_data[1];
+
+                    unsigned int text_length =
+                        frame_size - 1;
+
+                    if (strcmp(frame_id, "TIT2") == 0)
+                    {
+                        copy_utf16_text(
+                            title,
+                            title_size,
+                            text,
+                            text_length
+                        );
+                    }
+                    else if (strcmp(frame_id, "TPE1") == 0)
+                    {
+                        copy_utf16_text(
+                            artist,
+                            artist_size,
+                            text,
+                            text_length
+                        );
+                    }
+                    else if (strcmp(frame_id, "TALB") == 0)
+                    {
+                        copy_utf16_text(
+                            album,
+                            album_size,
+                            text,
+                            text_length
+                        );
+                    }
+                    else if (strcmp(frame_id, "TYER") == 0)
+                    {
+                        copy_utf16_text(
+                            year,
+                            year_size,
+                            text,
+                            text_length
+                        );
+                    }
+                    else if (strcmp(frame_id, "TCON") == 0)
+                    {
+                        copy_utf16_text(
+                            genre,
+                            genre_size,
+                            text,
+                            text_length
+                        );
                     }
                 }
             }
+        }
 
-
+        /*
+         * Move to next frame.
+         */
+        position += 10 + frame_size;
     }
+
+    free(tag_data);
+
+    return 1;
+}
 
 
 /*
- * Function: create_directory
- *
- * Purpose: creates a new folder directory if that directory doesn't already exsist based on the MP3 ID3 metadata
- *
- * Returns: new file path
+ * Create directory if it doesn't exist.
  */
-
 static void create_directory(const char *path)
 {
     struct stat st;
-    if (stat(path, &st) != 0) {
-        if  (mkdir(path, 0755) != 0) {
+
+    if (stat(path, &st) != 0)
+    {
+        if (mkdir(path, 0755) != 0)
+        {
             perror("mkdir");
         }
-    } else if (!S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "This exsists but not in the directory: %s\n", path);
+    }
+    else if (!S_ISDIR(st.st_mode))
+    {
+        fprintf(
+            stderr,
+            "Path exists but is not a directory: %s\n",
+            path
+        );
     }
 }
 
-/*
- * Function: move_file
- *
- * Purpose: move file into new album and artist dirctory base path
- *
- * Returns: base_path/artist/album/song.mp3
- */
 
+/*
+ * Move file into:
+ *
+ * base_path/artist/album/song.mp3
+ */
 static int move_file(
     const char *source_path,
     const char *base_path,
@@ -802,182 +812,200 @@ static int move_file(
     char album_path[PATH_MAX];
     char destination_path[PATH_MAX];
 
+    snprintf(
+        artist_path,
+        sizeof(artist_path),
+        "%s/%s",
+        base_path,
+        artist
+    );
 
-    /*
-     * create base_path/artist
-     *
-     * create artist directory
-     */
-
-    snprintf(artist_path, sizeof(artist_path),
-             "%s/%s",
-             base_path,
-             artist);
     create_directory(artist_path);
 
-    /*
-     * create base_path/artist/album
-     * create album directory
-     */
+    snprintf(
+        album_path,
+        sizeof(album_path),
+        "%s/%s",
+        artist_path,
+        album
+    );
 
-    snprintf(album_path, sizeof(album_path),
-             "%s/%s",
-             artist_path,
-             album);
     create_directory(album_path);
 
-
-    /*
-     * create final destination
-     * base_path/artist/album/song.mp3
-     */
-
-    snprintf(destination_path, sizeof(destination_path),
-             "%s/%s",
-             album_path,
-             filename);
-
-    /*
-     * move file
-     */
+    snprintf(
+        destination_path,
+        sizeof(destination_path),
+        "%s/%s",
+        album_path,
+        filename
+    );
 
     if (rename(source_path, destination_path) != 0)
     {
         perror("rename");
         return 0;
     }
-    printf("moved\n");
-    printf(" %s\n", source_path);
-    printf(" -> %s\n", destination_path);
+
+    printf("Moved:\n");
+    printf("  %s\n", source_path);
+    printf("  -> %s\n", destination_path);
+
     return 1;
 }
+
 
 int main(void)
 {
     /*
-     * folder containing unsorted MP3 files
+     * Folder containing unsorted MP3 files.
      */
-    const char *folder_path = "/home/kate/Music/";
+    const char *folder_path =
+        "/home/kate/Music/";
 
     /*
-     * count MP3 files
-     *
-     *
+     * Count MP3 files.
      */
-    int number_of_files_in_folder = file_counter(folder_path);
+    int number_of_files_in_folder =
+        file_counter(folder_path);
 
     if (number_of_files_in_folder < 0)
     {
         return 1;
     }
 
-    printf("Number of MP3 files: %d\n", number_of_files_in_folder);
+    printf(
+        "Number of MP3 files: %d\n",
+        number_of_files_in_folder
+    );
 
     /*
-     *
-     * open directory
+     * Open directory.
      */
     DIR *dir;
     struct dirent *entry;
 
     dir = opendir(folder_path);
-    if (dir == NULL) {
+
+    if (dir == NULL)
+    {
         perror("opendir");
         return 1;
     }
 
     /*
-     *
-     * read every file
-     *
+     * Process every MP3 file.
      */
     while ((entry = readdir(dir)) != NULL)
-{
-    if (strcmp(entry->d_name, ".") == 0 ||
-        strcmp(entry->d_name, "..") == 0)
     {
-        continue;
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+        {
+            continue;
+        }
+
+        const char *ext =
+            strrchr(entry->d_name, '.');
+
+        if (ext == NULL ||
+            strcasecmp(ext, ".mp3") != 0)
+        {
+            continue;
+        }
+
+        char full_path[PATH_MAX];
+
+        int path_length =
+            snprintf(
+                full_path,
+                sizeof(full_path),
+                "%s/%s",
+                folder_path,
+                entry->d_name
+            );
+
+        if (path_length < 0 ||
+            (size_t)path_length >= sizeof(full_path))
+        {
+            fprintf(
+                stderr,
+                "Path is too long: %s\n",
+                entry->d_name
+            );
+
+            continue;
+        }
+
+        printf("\n");
+        printf("-------------------------------\n");
+        printf("File: %s\n", entry->d_name);
+        printf("Path: %s\n", full_path);
+
+        /*
+         * Metadata buffers.
+         */
+        char artist[31] = "";
+        char album[31] = "";
+        char title[31] = "";
+        char year[5] = "";
+        char comment[31] = "";
+        char genre[64] = "";
+
+        /*
+         * Try ID3v1 first.
+         */
+        int found =
+            read_mp3_tags(
+                full_path,
+                artist,
+                sizeof(artist),
+                album,
+                sizeof(album),
+                title,
+                sizeof(title),
+                year,
+                sizeof(year),
+                comment,
+                sizeof(comment),
+                genre,
+                sizeof(genre)
+            );
+
+        /*
+         * If ID3v1 isn't found,
+         * try ID3v2.3.
+         */
+        if (!found)
+        {
+            found =
+                read_id3v2_tags(
+                    full_path,
+                    artist,
+                    sizeof(artist),
+                    album,
+                    sizeof(album),
+                    title,
+                    sizeof(title),
+                    comment,
+                    sizeof(comment),
+                    year,
+                    sizeof(year),
+                    genre,
+                    sizeof(genre)
+                );
+        }
+
+        /*
+         * Print metadata.
+         */
+        printf("Artist:  %s\n", artist);
+        printf("Album:   %s\n", album);
+        printf("Title:   %s\n", title);
+        printf("Year:    %s\n", year);
+        printf("Comment: %s\n", comment);
+        printf("Genre:   %s\n", genre);
     }
 
-    const char *ext = strrchr(entry->d_name, '.');
+    closedir(dir);
 
-    if (ext == NULL || strcasecmp(ext, ".mp3") != 0)
-    {
-        continue;
-    }
-
-    char full_path[PATH_MAX];
-
-    int path_length = snprintf(full_path, sizeof(full_path),
-                               "%s/%s",
-                               folder_path,
-                               entry->d_name);
-
-    if (path_length < 0 ||
-        (size_t)path_length >= sizeof(full_path))
-    {
-        fprintf(stderr, "Path is too long: %s\n",
-                entry->d_name);
-        continue;
-    }
-
-    printf("\n-------------------------------\n");
-    printf("File: %s\n", entry->d_name);
-    printf("Path: %s\n", full_path);
-
-    char artist[31];
-    char album[31];
-    char title[31];
-    char year[5];
-    char comment[31];
-    char genre[64];
-
-    /*metadata buffers*/
-
-    char artist[31] = "";
-    char album[31] = "";
-    char title[31] = "";
-    char year[5] = "";
-    char comment[31] = "";
-    char genre[64] = "";
-
-    /*try id3v1 first*/
-
-int found = read_mp3_tags(
-    full_path,
-    artist, sizeof(artist),
-    album, sizeof(album),
-    title, sizeof(title),
-    year, sizeof(year),
-    comment, sizeof(comment),
-    genre, sizeof(genre)
-);
-
-/*if ID3v1 tags where not found try ID3v2.3*/
-if (!found)
-{
-    found = read_id3v2_tags(
-        full_path,
-        artist, sizeof(artist),
-        album, sizeof(album),
-        title, sizeof(title),
-        comment, sizeof(comment),
-        year, sizeof(year),
-        genre, sizeof(genre)
-    );
-}
-
-/*print metadata*/
-printf("Artist:  %s\n", artist);
-printf("Album:   %s\n", album);
-printf("Title:   %s\n", title);
-printf("Year:    %s\n", year);
-printf("Comment: %s\n", comment);
-printf("Genre:   %s\n", genre);
-
-}
-
-closedir(dir);
-return 0;
-
+    return 0;
 }
