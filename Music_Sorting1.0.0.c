@@ -19,7 +19,7 @@
 #define PATH_MAX 4096
 #endif
 
-#define MAX_TRACKS 1000
+#define MAX_TRACKS 20000
 #define MAX_TEXT 256
 
 #define MUSIC_FOLDER "/home/kate/Music/"
